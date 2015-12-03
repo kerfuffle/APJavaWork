@@ -1,0 +1,532 @@
+package net.APJava.AIPong;
+
+/* CHANGE delay_ms from 16 to 4 to speed things up (line 94 or so) 
+ * YOUR JOB: Write the AlgorithmicPlayer code to play Pong against a 
+ * human player--primarily the update() method needs to get written
+ * After everybody's implemented their AI player, we'll have them face
+ * off against each other, so make sure they work just as well whether they're
+ * player 1 or player 2 (the whichPlayer parameter)
+ * (See OTHER WAY AROUND: for how to switch places)
+ */
+
+import java.awt.*;
+import java.awt.event.*;
+import java.io.File;
+import javax.swing.*;
+import static java.awt.event.KeyEvent.*;
+import java.util.Random;
+import javax.sound.sampled.*;
+
+class KeyTracker implements KeyListener {
+
+	final private boolean[] keyPressed;
+	final private boolean[] keyDown;
+
+	KeyTracker(JComponent parent) {
+		keyDown = new boolean[256];
+		keyPressed = new boolean[256];
+		parent.addKeyListener(this);
+		parent.setFocusable(true);
+		parent.requestFocusInWindow();
+	}
+
+	public void keyTyped(KeyEvent e) {
+	}
+
+
+	public void keyPressed(KeyEvent e) {
+		int keycode = e.getKeyCode();
+		if (keycode >= 0 && keycode < 256) {
+			keyPressed[keycode] = true;
+			keyDown[keycode] = true;
+		}
+	}
+
+	public void keyReleased(KeyEvent e) {
+		int keycode = e.getKeyCode();
+		if (keycode >= 0 && keycode < 256) {
+			keyDown[keycode] = false;
+		}
+	}
+
+	public void resetKeys() {
+		for (int i = 0; i < 256; i++) {
+			keyDown[i] = false;
+		}
+	}
+
+	public boolean isKeyDown(int keycode) {
+		return (keycode >= 0 && keycode < 256) ? keyDown[keycode] : false;
+	}
+
+	public boolean wasKeyPressed(int keycode) {
+		return (keycode >= 0 && keycode < 256) ? keyPressed[keycode] : false;
+	}
+}
+
+/* Version 2-10-26-15--This version has less choppy animation due to forcing the
+ use of high-precision timer due to using Thread.sleep, not a Timer object    */
+ abstract class GameBase extends JComponent {
+	 // technical details:
+
+	 private JFrame window;
+	 protected KeyTracker keys;
+	 private Thread sleepyThread;
+	 private boolean running;
+
+	 GameBase(JFrame window) {
+		 this.window = window;
+		 // Using a Thread.sleep makes smoother animation than using either java.util.Timer
+		 // or javax.swing.Timer.
+		 // Yes, for this obscure reason (seems to be Windows-only?):
+		 // 'Having a sleeping thread forces the VM to use the high-precision timer.' 
+		 // --http://www.java-gaming.org/index.php/topic,24112.
+		 // without this, the animation is choppy.  Ugh.
+		 final Runnable doUpdate = new Runnable() {
+			 public void run() {
+				 update();
+			 }
+		 };
+		 running = true;
+		 sleepyThread = new Thread(new Runnable() {
+			 public void run() {
+				 try {
+					 long lastFrame = System.currentTimeMillis();
+					 while (running) {
+						 // we want 60 FPS...
+						 // still gives some jitter, but seems to be the best of the alternatives I am aware of...
+						 int delay_ms = 16;
+						 // this compensates for some inaccuracies of the sleep method
+						 while (System.currentTimeMillis() - lastFrame < delay_ms) {
+							 Thread.sleep(1);
+						 }
+						 // we want to invoke update() on the swing EDT:
+						 SwingUtilities.invokeLater(doUpdate);
+						 repaint();
+						 lastFrame = System.currentTimeMillis();
+					 }
+				 } catch (Exception e) {
+				 }
+			 }
+		 });
+		 keys = new KeyTracker(this);
+	 }
+
+	 public void start() {
+		 sleepyThread.start();
+	 }
+	 // this is only needed because we can't 'X' out
+
+	 public void quit() {
+		 window.dispose();
+		 running = false;
+	 }
+
+	 // YOU need to write this method:
+	 public abstract void update();
+ }
+
+ /* Plan of attack: start with getting the board drawn, the players drawn,
+  * let the players move, THEN do the ball, collisions come last (write
+  * a detectCollision method??), then scoring...
+  */
+ interface CollisionObject {
+
+	 int getX();
+
+	 int getY();
+
+	 int getW();
+
+	 int getH();
+ }
+ // GameInterface: This interface is what the AlgorithmicPlayers may use to find out what's
+ // going on in the game.
+
+ interface GameInterface {
+
+	 CollisionObject getPlayer1();
+
+	 CollisionObject getPlayer2();
+
+	 CollisionObject getBall();
+ }
+
+ abstract class Player implements CollisionObject {
+
+	 private int x, y;
+	 private int score;
+
+	 public Player(int x, int y) {
+		 score = 0;
+		 this.x = x;
+		 this.y = y;
+	 }
+	 public void moveUp() {
+		 y -= 10;
+	 }
+	 public void moveDown() {
+		 y += 10;
+	 }
+	 public void incrementScore() {
+		 score++;
+	 }
+
+	 public void normalizePosition() {
+		 if (y < 0) {
+			 y = 0;
+		 }
+		 // don't let them go off the bottom:
+			 if (y + 100 > 600) {
+				 y = 500;
+			 }
+	 }
+
+	 abstract void update(GameInterface game);
+
+	 public int getX() {
+		 return x;
+	 }
+
+	 public int getY() {
+		 return y;
+	 }
+
+	 public int getW() {
+		 return 30;
+	 }
+
+	 public int getH() {
+		 return 100;
+	 }
+
+	 public int getScore() {
+		 return score;
+	 }
+
+	 public void draw(Graphics g) {
+		 g.fillRect(x, y, 30, 100);
+	 }
+ }
+
+ class HumanPlayer extends Player {
+
+	 private int upKey, downKey;
+	 private KeyTracker keys;
+
+	 HumanPlayer(int x, int y, int upKey, int downKey, KeyTracker keys) {
+		 super(x, y);
+		 this.upKey = upKey;
+		 this.downKey = downKey;
+		 this.keys = keys;
+	 }
+
+	 public void update(GameInterface game) {
+		 if (keys.isKeyDown(upKey)) {
+			 moveUp();
+		 }
+		 if (keys.isKeyDown(downKey)) {
+			 moveDown();
+		 }
+	 }
+ }
+
+ class Ball implements CollisionObject {
+
+	 private int x, y;
+	 private int Vx, Vy;
+	 private int resetCounter;
+	 static final int BALL_RESET_SPEED = 14; // 14 or lower allows perfect play; 16 allows sometimes can't get to it from center
+	 public Ball(int x, int y, int Vx, int Vy) {
+		 this.x = x;
+		 this.y = y;
+		 this.Vx = Vx;
+		 this.Vy = Vy;
+		 resetCounter = 0;
+	 }
+
+	 public int getX() {
+		 return x;
+	 }
+
+	 public int getY() {
+		 return y;
+	 }
+
+	 public int getVx() {
+		 return Vx;
+	 }
+
+	 public int getVy() {
+		 return Vy;
+	 }
+	 void initializePosition() {
+		 double num = Math.random();
+		 if (num < 0.5) {
+			 Vx = BALL_RESET_SPEED;
+		 } else {
+			 Vx = -BALL_RESET_SPEED;
+		 }
+		 Vy = 2;
+		 x = 385;
+		 y = 285;
+	 }
+	 void reset() {
+		 x = 385;
+		 y = 285;
+		 resetCounter = 60;
+	 }
+
+	 void reflectHorizontal(int playerCenter) {
+		 Vx *= -1;
+		 // random:
+			 // Vy = (int) ((Math.random() - 0.5) * 16);
+		 int ballCenter = getY() + getH() / 2;
+		 int offset = playerCenter - ballCenter;
+		 Vy = (int) (-8.0 * offset / 50.0);
+		 Vy += (int)(Math.random() * 6 - 3);
+	 }
+
+	 void reflectVertical() {
+		 Vy *= -1;
+	 }
+
+	 void update(GameInterface game) {
+		 if (resetCounter <= 0) {
+			 x += Vx;
+			 y += Vy;
+		 } else {
+			 resetCounter--;
+			 if (resetCounter == 0)
+				 initializePosition();
+		 }
+	 }
+
+	 void draw(Graphics g) {
+		 if (resetCounter <= 0) // advanced
+		 {
+			 g.fillRect(x, y, 30, 30);
+		 }
+	 }
+
+	 public int getW() {
+		 return 30;
+	 }
+
+	 public int getH() {
+		 return 30;
+	 }
+ }
+
+
+ class AlgorithmicPlayer extends Player {
+	 int whichPlayer;    // which player are WE? This might be necessary...
+	 AlgorithmicPlayer(int x, int y, int whichPlayer) {
+		 super(x, y);
+		 this.whichPlayer = whichPlayer;        
+	 }
+
+	 void update(GameInterface game) {
+		 // check out the GameInterface interface: it allows us to get either player or
+		 // the ball, as a collision object--so we can then read out the x,y,
+		 // width/height of any object in the game and use this to write our AI
+		 //
+		 // We can't directly access the x-velocity/y-velocity of the objects,
+		 // although it is possible to remember the past positions of the objects
+		 // from the last time update was called and use this to calculate their
+		 // velocities
+
+		 // Your update(..) method should call moveUp() or moveDown() ONCE AND ONLY ONCE
+		 // here's some useful stuff to help you get started:
+		 CollisionObject ball = game.getBall();
+		 int ballX = ball.getX() + ball.getW()/2;
+		 int ballY = ball.getY() + ball.getH()/2;
+		 int ourCenterY = getY() + getH()/2;
+
+		 //800x600
+		 
+		 Random rand = new Random();
+		 int randCoord = rand.nextInt(ball.getH());
+
+		 if (whichPlayer == 2)
+		 {
+			 if (ballX > 800/2)
+			 {
+				 if (ourCenterY < ballY + randCoord)
+				 {
+					 moveDown();
+				 }
+				 if (ourCenterY > ballY + randCoord)
+				 {
+					 moveUp();
+				 }
+			 }
+		 }
+		 else
+		 {
+			 if (ballX < 800/2)
+			 {
+				 if (ourCenterY < ballY + randCoord)
+				 {
+					 moveDown();
+				 }
+				 if (ourCenterY > ballY + randCoord)
+				 {
+					 moveUp();
+				 }
+			 }
+		 }
+
+
+
+		 // if our center is GREATER THAN the ball's, we're too low, so move UP:
+		 // Use a 'tolerance' of 5 to avoid shaking (i.e., don't simply check
+		 // if we're lower than the ball; check if our position MINUS 5 is STILL
+		 // lower than the ball, and if so, THEN move up.
+
+		 // if our center Y-coordinate is LESS THAN the ball's, we're too high,
+		 // so move DOWN.  (Again, use a TOLERANCE of 5 or so to prevent jitter)
+
+		 /* DELETE THIS TERRIBLE AI ASAP: */
+		 /*double random_number = Math.random();
+        if (random_number < .3)
+            moveUp();
+        else if (random_number > .7)
+            moveDown();*/
+	 }
+	 
+ }
+ 
+
+ public class HyperPong extends GameBase implements GameInterface {
+
+	 private Player player1, player2;
+	 private Ball ball;
+	 // sound:
+	 private Clip audioClip;
+
+	 public static boolean intersects(CollisionObject c1, CollisionObject c2) {
+		 int left1 = c1.getX();
+		 int right1 = c1.getX() + c1.getW() - 1;
+		 int top1 = c1.getY();
+		 int bottom1 = c1.getY() + c1.getH() - 1;
+		 int left2 = c2.getX();
+		 int right2 = c2.getX() + c2.getW() - 1;
+		 int top2 = c2.getY();
+		 int bottom2 = c2.getY() + c2.getH() - 1;
+		 return (left1 <= right2 && left2 <= right1 && top1 <= bottom2 && top2 <= bottom1);
+	 }
+
+	 void playSound() {
+		 audioClip.start();   // start playback, play once   
+		 audioClip.setFramePosition(0);
+	 }
+	 // This is the CONSTRUCTOR:  it is supposed to initialize the data
+
+	 HyperPong(JFrame window) {
+		 super(window);
+		 // two SmarterAlgorithmic players versus each other: neither ever scores a point
+		 player1 = new AlgorithmicPlayer(20, 250, 1);//HumanPlayer(20, 250, VK_W, VK_S, keys);
+		 player2 = new AlgorithmicPlayer(750, 250, 2);
+		 // OTHER WAY AROUND: uncomment these two lines and comment the two previous lines
+		 // to switch places:
+		 // player2 = new HumanPlayer(750, 250, VK_W, VK_S, keys);
+		 // player1 = new AlgorithmicPlayer(20, 250, 1);        
+
+		 ball = new Ball(0, 0, 0, 0);
+		 ball.reset();
+
+		 start();
+	 }
+
+	 public void update() {
+		 ball.update(this);
+		 player1.update(this);
+		 player2.update(this);
+
+		 if (keys.isKeyDown(VK_ESCAPE)) {
+			 quit();
+		 }
+		 checkCollisions();
+		 normalizePositions();
+	 }
+
+	 public void checkCollisions() {
+		 // ball bounces off player2:
+		 if (intersects(ball, player2)
+				 && ball.getVx() >= 0) {
+			 ball.reflectHorizontal(player2.getY() + player2.getH() / 2);
+			 // playSound();
+		 }
+		 // ball bounces off player1:
+		 if (intersects(ball, player1)
+				 && ball.getVx() <= 0) {
+			 ball.reflectHorizontal(player1.getY() + player1.getH() / 2);
+			 // playSound();
+		 }
+		 // bounce off ceiling:
+		 if (ball.getY() <= 0 && ball.getVy() <= 0) {
+			 ball.reflectVertical();
+		 }
+		 // bounce off floor:
+		 if (ball.getY() + 30 >= 600 && ball.getVy() >= 0) {
+			 ball.reflectVertical();
+		 }
+
+		 // player2 scores if hit left wall:
+		 if (ball.getX() + 30 <= 0) {
+			 player2.incrementScore();
+			 ball.reset();
+		 }
+		 // player1 scores if hit right wall:
+		 if (ball.getX() >= 800) {
+			 player1.incrementScore();
+			 ball.reset();
+		 }
+	 }
+
+	 void normalizePositions() {
+		 // don't let them go off the top:
+		 player1.normalizePosition();
+		 player2.normalizePosition();
+	 }
+
+	 // here's another method:  it's where are the 'drawing' gets done
+	 public void paintComponent(Graphics g) {
+		 // draw background:
+		 g.setColor(Color.black);
+		 g.fillRect(0, 0, 800, 600);
+
+		 g.setColor(Color.white);
+		 player1.draw(g);
+		 player2.draw(g);
+		 ball.draw(g);
+		 // draw score:
+		 g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 34));
+		 g.drawString("1:" + player1.getScore(), 30, 30);
+		 g.drawString("2:" + player2.getScore(), 700, 30);
+	 }
+	 // main is where the action starts:  it sets things up
+
+	 public static void main(String[] args) {
+		 JFrame mainWindow = new JFrame();
+		 mainWindow.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+		 mainWindow.setPreferredSize(new Dimension(800, 600));
+		 mainWindow.setUndecorated(true);
+		 mainWindow.setLocation(200, 200);
+		 mainWindow.add(new HyperPong(mainWindow));
+		 mainWindow.pack();
+		 mainWindow.setVisible(true);
+	 }
+	 public CollisionObject getPlayer1() {
+		 return player1;
+	 }
+
+	 public CollisionObject getPlayer2() {
+		 return player2;
+	 }
+
+	 public CollisionObject getBall() {
+		 return ball;
+	 }
+ }
